@@ -328,6 +328,42 @@ public class PatronService extends AbstractKohaService {
         callRequestWithArrayEntity(request, finalSet);
     }
 
+    /**
+     * Escribe EXACTAMENTE el conjunto dado de extended_attributes (sin merge-preserve).
+     *
+     * <p>MOTIVO (v1.7.1, medido en PROD el 28-oct-2026): {@code updateDelta} ya calcula el
+     * conjunto final a partir del estado REAL del patron ({@code actuales - bajas + altas}),
+     * asi que los tipos ajenos a MidPoint ya vienen dentro. Pasarlo por
+     * {@link #replaceExtendedAttributes} lo estropeaba: alli solo se consideran
+     * "gobernados" los tipos presentes en la lista, y los demas se preservan desde Koha.
+     * Cuando MidPoint daba de baja TODOS los valores de un tipo (p. ej. STUDY_LEVEL y
+     * STUDYCYCLE al dejar de ser estudiante), ese tipo ya no estaba en la lista, se
+     * preservaba, y la baja nunca se aplicaba: cada recompute reenviaba el mismo DELETE.</p>
+     *
+     * @param uid     patron_id (borrowernumber)
+     * @param entries conjunto final de objetos {@code {"type":...,"value":...}}
+     */
+    public void putExtendedAttributesExact(String uid, JSONArray entries)
+            throws ConnectorException, IOException {
+        JSONArray finalSet = new JSONArray();
+        java.util.Set<String> emitted = new java.util.LinkedHashSet<>();
+        if (entries != null) {
+            for (int i = 0; i < entries.length(); i++) {
+                JSONObject e = entries.optJSONObject(i);
+                if (e == null) continue;
+                String t = e.optString("type", null);
+                if (t == null || t.isEmpty()) continue;
+                String value = e.optString("value", "");
+                if (emitted.add(t + "\u0000" + value)) {
+                    finalSet.put(new JSONObject().put("type", t).put("value", value));
+                }
+            }
+        }
+        HttpPut request = new HttpPut(getBaseUrl() + "/" + uid + "/extended_attributes");
+        LOG.ok("PUT extended_attributes patron {0}: {1} entradas (exacto, desde updateDelta)", uid, finalSet.length());
+        callRequestWithArrayEntity(request, finalSet);
+    }
+
     public void deletePatron(String uid) throws ConnectorException, IOException {
         HttpDelete request = new HttpDelete(getBaseUrl() + "/" + uid);
         callRequest(request);

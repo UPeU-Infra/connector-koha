@@ -93,6 +93,11 @@ public class JdbcConnectionProvider {
         // useUnicode + UTF-8 para consistencia del blob/mimetype.
         // maxPoolSize fija el tope del pool nativo del driver.
         // connectTimeout limita el bloqueo si la BD no responde.
+        // socketTimeout (v1.7.1) limita CADA lectura del socket. Sin el, la validacion de una
+        // conexion ociosa del pool (checkAlive -> isValid -> PING) esperaba para siempre si la
+        // red habia cortado la conexion en silencio: medido en PROD el 28-oct-2026, ~15 min
+        // colgado hasta que TCP agoto sus reintentos (ss: backoff 11/15 hacia :3306).
+        // Con 30 s la conexion muerta falla rapido, el pool la descarta y abre otra.
         // Las credenciales van en la URL para que se cree UN SOLO pool, ya autenticado
         // (encadenar setUser/setPassword creaba pools huerfanos sin contrasena).
         // minPoolSize=1: el driver abre minPoolSize conexiones de forma EAGER en el
@@ -107,6 +112,7 @@ public class JdbcConnectionProvider {
                 + "&minPoolSize=1"
                 + "&registerJmxPool=false"
                 + "&connectTimeout=10000"
+                + "&socketTimeout=30000"
                 + "&poolName=" + urlEncode(this.poolName)
                 + "&user=" + urlEncode(user)
                 + "&password=" + urlEncode(password);

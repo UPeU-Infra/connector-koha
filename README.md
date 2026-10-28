@@ -177,6 +177,27 @@ Revisa los logs de MidPoint para ver los mensajes emitidos por el conector.
 
 ## 📜 Changelog
 
+### v1.7.1 (2026-10-28)
+
+- **Fix**: las **bajas** de `extended_attributes` por fin se aplican. `updateDelta` calculaba bien
+  `actuales − bajas + altas`, pero el resultado pasaba por el *merge-preserve* de
+  `replaceExtendedAttributes`, que solo trata como gobernados los tipos presentes en la lista y
+  **conserva** los demás desde Koha. Cuando MidPoint retiraba todos los valores de un tipo (p. ej.
+  `STUDY_LEVEL`/`STUDYCYCLE` al dejar de ser estudiante), el tipo se volvía a escribir y cada
+  recompute reenviaba el mismo DELETE (medido en PROD el 28-oct: 45 patrons, 3 pasadas idénticas).
+  Ahora `updateDelta` escribe el conjunto final exacto (`PatronService.putExtendedAttributesExact`)
+  y compara por el par (type, value), no por el texto JSON. Si no puede leer el estado actual,
+  conserva el camino anterior (solo altas + merge-preserve).
+- **Fix**: `socketTimeout=30000` en la URL JDBC. La validación de una conexión ociosa del pool
+  (`checkAlive → isValid`) se colgaba ~15 min si la red había cortado la conexión en silencio.
+- **Tests**: `KohaConnectorExtendedAttributesTest` (baja total de un tipo, orden de claves, cambio de
+  valor sin duplicar, alta repetida, sin `extended_attribute_id`).
+
+### v1.7.0 (2026-08-15)
+
+- **Fix**: implementa `UpdateDeltaOp`. Con `UpdateOp` a secas ConnId entregaba altas y bajas
+  fusionadas y Koha respondía `409 Tried to add more than one non-repeatable attributes`.
+
 ### v1.6.0 (2026-07-25)
 - **Feature**: `KohaConnector` implementa `PoolableConnector` (`checkAlive()`). Sin esa interfaz, MidPoint creaba y destruía una instancia completa del conector —con su propio pool JDBC— en cada operación de la API; en una reconciliación de ~27.500 cuentas eso eran decenas de miles de pools abriéndose y cerrándose por ciclo. Ahora ConnId reutiliza instancias entre operaciones según `connectorPoolConfiguration` del recurso.
 - **Diseño**: `checkAlive()` es deliberadamente barato — nunca llama a la API REST de Koha (sería un round-trip de red por operación). Valida solo que `httpAdapter` siga instanciado y, si `dbEnabled=true`, revalida el pool JDBC vía `testConnection()` (el propio driver limita esa revalidación a una vez por segundo por conexión).

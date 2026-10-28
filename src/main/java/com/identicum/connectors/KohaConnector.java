@@ -295,6 +295,12 @@ public class KohaConnector implements PoolableConnector, CreateOp, UpdateOp, Upd
 		Set<Attribute> attrs = new java.util.HashSet<>();
 		for (AttributeDelta d : deltas) {
 			String name = d.getName();
+			if ("extended_attributes".equals(name) && d.getValuesToReplace() == null
+					&& ObjectClass.ACCOUNT.is(oClass.getObjectClassValue())
+					&& writeExtendedAttributesExact(uid, d)) {
+				// Ya escrito con el conjunto final exacto; no pasa por el merge-preserve de update().
+				continue;
+			}
 			if (d.getValuesToReplace() != null) {
 				// Atributo single-value o reemplazo explicito: se pasa tal cual.
 				attrs.add(AttributeBuilder.build(name, d.getValuesToReplace()));
@@ -304,8 +310,96 @@ public class KohaConnector implements PoolableConnector, CreateOp, UpdateOp, Upd
 				attrs.add(AttributeBuilder.build(name, resolveMultivalued(oClass, uid, name, d)));
 			}
 		}
-		update(oClass, uid, attrs, options);
+		if (!attrs.isEmpty()) {
+			update(oClass, uid, attrs, options);
+		}
 		return java.util.Collections.emptySet();
+	}
+
+	/**
+	 * v1.7.1 — aplica altas/bajas de {@code extended_attributes} sobre el estado REAL del patron
+	 * y escribe el resultado tal cual (ver {@link PatronService#putExtendedAttributesExact}).
+	 *
+	 * @return {@code false} si no se pudo leer el estado actual: el llamador cae entonces al
+	 *         camino anterior (solo altas + merge-preserve), que nunca borra lo que no conoce.
+	 */
+	private boolean writeExtendedAttributesExact(Uid uid, AttributeDelta delta) {
+		JSONArray current;
+		try {
+			JSONObject patron = patronService.getPatron(uid.getUidValue());
+			Object raw = patron != null ? patron.opt("extended_attributes") : null;
+			current = raw instanceof JSONArray ? (JSONArray) raw : new JSONArray();
+		} catch (Exception e) {
+			LOG.warn(e, "UpdateDelta {0}: no se pudo leer extended_attributes; se aplican solo las altas", uid.getUidValue());
+			return false;
+		}
+		JSONArray finalSet = resolveExtendedAttributes(current, delta.getValuesToRemove(), delta.getValuesToAdd());
+		try {
+			patronService.putExtendedAttributesExact(uid.getUidValue(), finalSet);
+		} catch (IOException e) {
+			throw new ConnectorIOException("Error de IO escribiendo extended_attributes de " + uid.getUidValue() + ": " + e.getMessage(), e);
+		}
+		return true;
+	}
+
+	/**
+	 * {@code actuales - bajas + altas}, comparando por el par (type, value) y no por el texto
+	 * JSON: {@code JSONObject.toString()} no garantiza el orden de las claves, y MidPoint manda
+	 * {@code {"type":..,"value":..}}; comparar cadenas podia hacer que una baja no casara nunca.
+	 */
+	static JSONArray resolveExtendedAttributes(JSONArray current, java.util.Collection<Object> toRemove,
+			java.util.Collection<Object> toAdd) {
+		java.util.LinkedHashMap<String, JSONObject> result = new java.util.LinkedHashMap<>();
+		for (int i = 0; i < current.length(); i++) {
+			JSONObject e = current.optJSONObject(i);
+			String key = extendedAttributeKey(e);
+			if (key != null) {
+				result.put(key, new JSONObject().put("type", e.optString("type")).put("value", e.optString("value", "")));
+			}
+		}
+		if (toRemove != null) {
+			for (Object v : toRemove) {
+				String key = extendedAttributeKey(parseExtendedAttribute(v));
+				if (key != null) {
+					result.remove(key);
+				}
+			}
+		}
+		if (toAdd != null) {
+			for (Object v : toAdd) {
+				JSONObject e = parseExtendedAttribute(v);
+				String key = extendedAttributeKey(e);
+				if (key != null && !result.containsKey(key)) {
+					result.put(key, new JSONObject().put("type", e.optString("type")).put("value", e.optString("value", "")));
+				}
+			}
+		}
+		JSONArray out = new JSONArray();
+		result.values().forEach(out::put);
+		return out;
+	}
+
+	private static JSONObject parseExtendedAttribute(Object v) {
+		if (v == null) {
+			return null;
+		}
+		try {
+			return new JSONObject(v.toString());
+		} catch (Exception e) {
+			LOG.warn("extended_attributes: valor no es JSON {type,value}, se ignora: {0}", v);
+			return null;
+		}
+	}
+
+	private static String extendedAttributeKey(JSONObject e) {
+		if (e == null) {
+			return null;
+		}
+		String t = e.optString("type", null);
+		if (t == null || t.isEmpty()) {
+			return null;
+		}
+		return t + "\u0000" + e.optString("value", "");
 	}
 
 	/**
