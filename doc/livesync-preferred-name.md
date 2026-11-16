@@ -246,8 +246,7 @@ ORDER BY action_id;
   **exactamente 58 y 59**; las filas 48, 54 y 57 (solo `preferred_name`, de la misma cuenta) no salen.
   Está en `KohaLiveSyncWriteDevIT#alertaCambiosDeDiscoveryFueraDePreferredName`
   (`KOHA_LIVE_IT_ALERT_USER=<bn de Discovery>`).
-- Es un **prototipo**: no está programado en ningún servidor. Dónde correrlo (tarea de midPoint,
-  cron con aviso por correo/Telegram) queda por decidir.
+- **Implementada como cron** en [`ops/alerta-discovery/`](../ops/alerta-discovery/README.md) (decisión de Alberto, 16-nov-2026): cada 5 min, aviso por Telegram sin valores, cursor propio, fail-closed si la cuenta no existe y sin avanzar el cursor si el aviso no sale. Probada en Koha dev con cron real; en PROD se instala cuando exista la cuenta de API de Discovery.
 
 ## Limitaciones
 
