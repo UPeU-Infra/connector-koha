@@ -178,7 +178,7 @@ Revisa los logs de MidPoint para ver los mensajes emitidos por el conector.
 
 ## 📜 Changelog
 
-### v1.8.0 (sin publicar)
+### v1.8.0 (2026-11-16)
 
 - **Feature**: live sync (`SyncOp` + `getLatestSyncToken`) para el «nombre preferido». Cursor
   `action_logs.action_id`; solo `MEMBERS/MODIFY` cuyo cambio toca `preferred_name`
