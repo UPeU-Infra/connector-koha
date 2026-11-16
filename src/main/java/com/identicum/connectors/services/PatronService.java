@@ -130,6 +130,23 @@ public class PatronService extends AbstractKohaService {
     }
 
     /**
+     * v1.8.0 — borrowernumber del patron con ese {@code userid} exacto, o {@code null} si no
+     * existe. Lo usa el live sync para resolver {@code syncExcludeUserLogins}.
+     */
+    public Long findPatronIdByUserid(String userid) throws ConnectorException, IOException {
+        JSONObject patron = findPatronExact("userid", userid);
+        if (patron == null || !patron.has("patron_id") || patron.isNull("patron_id")) {
+            return null;
+        }
+        // Defensa: _match=exact deberia bastar, pero si Koha devolviera otro patron no se excluye a ciegas.
+        // Sin distinguir mayusculas porque borrowers.userid es UNIQUE con collation *_ci.
+        if (!userid.equalsIgnoreCase(patron.optString("userid", ""))) {
+            return null;
+        }
+        return patron.getLong("patron_id");
+    }
+
+    /**
      * Busca un patron por un campo indexado de Koha (cardnumber|userid|email) con
      * coincidencia EXACTA. Devuelve el primer resultado o null si no existe.
      *
