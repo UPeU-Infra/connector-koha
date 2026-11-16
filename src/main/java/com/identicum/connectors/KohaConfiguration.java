@@ -42,6 +42,22 @@ public class KohaConfiguration implements Configuration {
     private GuardedString dbPassword;
     private int dbPoolSize = 2;
 
+    // --- Live sync (v1.8.0): SyncOp sobre action_logs por el canal JDBC ---
+    /**
+     * borrowernumber de los usuarios cuyos cambios NO se emiten en el live sync (antieco):
+     * la cuenta de API con la que escribe midPoint. Se excluye por USUARIO, nunca por
+     * interfaz, porque otros sistemas (Discovery) tambien escriben por la API.
+     */
+    private String[] syncExcludeUserIds = new String[0];
+    /** Igual que {@link #syncExcludeUserIds}, pero por {@code userid} (se resuelve por REST). */
+    private String[] syncExcludeUserLogins = new String[0];
+    /** Campos de borrowers cuyo cambio dispara un SyncDelta. Por defecto solo preferred_name. */
+    private String[] syncTriggerFields = new String[] {"preferred_name"};
+    /** Filas de action_logs por consulta (LIMIT). */
+    private int syncBatchSize = 500;
+    /** No se lee mas alla de la primera fila con menos de estos segundos de antiguedad. */
+    private int syncSafetyLagSeconds = 10;
+
     // Campo para almacenar los mensajes del conector inyectados por el framework
     private ConnectorMessages connectorMessages;
 
@@ -219,6 +235,63 @@ public class KohaConfiguration implements Configuration {
         this.dbPoolSize = dbPoolSize;
     }
 
+    // --- Propiedades del live sync ---
+
+    @ConfigurationProperty(order = 60,
+            displayMessageKey = "koha.config.syncExcludeUserIds.display",
+            helpMessageKey = "koha.config.syncExcludeUserIds.help")
+    public String[] getSyncExcludeUserIds() {
+        return syncExcludeUserIds;
+    }
+
+    public void setSyncExcludeUserIds(String[] syncExcludeUserIds) {
+        this.syncExcludeUserIds = syncExcludeUserIds;
+    }
+
+    @ConfigurationProperty(order = 61,
+            displayMessageKey = "koha.config.syncExcludeUserLogins.display",
+            helpMessageKey = "koha.config.syncExcludeUserLogins.help")
+    public String[] getSyncExcludeUserLogins() {
+        return syncExcludeUserLogins;
+    }
+
+    public void setSyncExcludeUserLogins(String[] syncExcludeUserLogins) {
+        this.syncExcludeUserLogins = syncExcludeUserLogins;
+    }
+
+    @ConfigurationProperty(order = 62,
+            displayMessageKey = "koha.config.syncTriggerFields.display",
+            helpMessageKey = "koha.config.syncTriggerFields.help")
+    public String[] getSyncTriggerFields() {
+        return syncTriggerFields;
+    }
+
+    public void setSyncTriggerFields(String[] syncTriggerFields) {
+        this.syncTriggerFields = syncTriggerFields;
+    }
+
+    @ConfigurationProperty(order = 63,
+            displayMessageKey = "koha.config.syncBatchSize.display",
+            helpMessageKey = "koha.config.syncBatchSize.help")
+    public int getSyncBatchSize() {
+        return syncBatchSize;
+    }
+
+    public void setSyncBatchSize(int syncBatchSize) {
+        this.syncBatchSize = syncBatchSize;
+    }
+
+    @ConfigurationProperty(order = 64,
+            displayMessageKey = "koha.config.syncSafetyLagSeconds.display",
+            helpMessageKey = "koha.config.syncSafetyLagSeconds.help")
+    public int getSyncSafetyLagSeconds() {
+        return syncSafetyLagSeconds;
+    }
+
+    public void setSyncSafetyLagSeconds(int syncSafetyLagSeconds) {
+        this.syncSafetyLagSeconds = syncSafetyLagSeconds;
+    }
+
     /**
      * Valida que la configuración proporcionada sea coherente y completa.
      */
@@ -264,6 +337,21 @@ public class KohaConfiguration implements Configuration {
             }
             if (dbPoolSize < 1) {
                 throw new IllegalArgumentException("El tamano del pool JDBC (dbPoolSize) debe ser >= 1. Valor actual: " + dbPoolSize);
+            }
+        }
+
+        // --- Validación del live sync ---
+        if (syncBatchSize < 1 || syncBatchSize > 10000) {
+            throw new IllegalArgumentException("syncBatchSize debe estar entre 1 y 10000. Valor actual: " + syncBatchSize);
+        }
+        if (syncSafetyLagSeconds < 0 || syncSafetyLagSeconds > 3600) {
+            throw new IllegalArgumentException("syncSafetyLagSeconds debe estar entre 0 y 3600. Valor actual: " + syncSafetyLagSeconds);
+        }
+        if (syncExcludeUserIds != null) {
+            for (String id : syncExcludeUserIds) {
+                if (id == null || !id.trim().matches("[0-9]{1,10}")) {
+                    throw new IllegalArgumentException("syncExcludeUserIds solo admite borrowernumber numericos. Valor: '" + id + "'");
+                }
             }
         }
     }

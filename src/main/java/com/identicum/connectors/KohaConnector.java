@@ -9,6 +9,12 @@ import com.identicum.connectors.services.HttpClientAdapter;
 import com.identicum.connectors.services.DefaultHttpClientAdapter;
 import com.identicum.connectors.services.JdbcConnectionProvider;
 import com.identicum.connectors.services.PatronPermissionService;
+import com.identicum.connectors.services.ActionLogSyncService;
+import com.identicum.connectors.sync.ActionLogChangeFilter;
+import com.identicum.connectors.sync.KohaLiveSync;
+import org.identityconnectors.framework.common.exceptions.ConnectionFailedException;
+import org.identityconnectors.framework.common.exceptions.UnknownUidException;
+import org.identityconnectors.framework.spi.SyncTokenResultsHandler;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.identityconnectors.common.logging.Log;
 import org.identityconnectors.common.StringUtil;
@@ -36,7 +42,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 @ConnectorClass(displayNameKey = "connector.identicum.rest.display", configurationClass = KohaConfiguration.class)
-public class KohaConnector implements PoolableConnector, CreateOp, UpdateOp, UpdateDeltaOp, SchemaOp, SearchOp<KohaFilter>, DeleteOp, TestOp {
+public class KohaConnector implements PoolableConnector, CreateOp, UpdateOp, UpdateDeltaOp, SchemaOp, SearchOp<KohaFilter>, DeleteOp, TestOp, SyncOp {
 
 	private static final Log LOG = Log.getLog(KohaConnector.class);
 
@@ -50,6 +56,10 @@ public class KohaConnector implements PoolableConnector, CreateOp, UpdateOp, Upd
 	// Nulos si dbEnabled=false o si la BD no estuvo disponible al init().
 	private JdbcConnectionProvider jdbcConnectionProvider;
 	private PatronPermissionService patronPermissionService;
+	// v1.8.0 — live sync sobre action_logs (mismo pool JDBC). Nulo si el canal JDBC no esta operativo.
+	private ActionLogSyncService actionLogSyncService;
+	// borrowernumber excluidos (antieco), resueltos una vez por instancia del conector.
+	private volatile java.util.Set<Long> resolvedSyncExclusions;
 	private final PatronMapper patronMapper = new PatronMapper();
 	private final CategoryMapper categoryMapper = new CategoryMapper();
 	private final AtomicReference<Schema> connectorSchema = new AtomicReference<>();
@@ -95,6 +105,8 @@ public class KohaConnector implements PoolableConnector, CreateOp, UpdateOp, Upd
 						dbPassword,
 						this.configuration.getDbPoolSize());
 				this.patronPermissionService = new PatronPermissionService(this.jdbcConnectionProvider);
+				this.actionLogSyncService = new ActionLogSyncService(this.jdbcConnectionProvider,
+						this.configuration.getDbName(), this.configuration.getDbUser());
 				LOG.ok("Canal JDBC para la autorizacion del patron inicializado.");
 			} catch (Exception e) {
 				// No abortar el init: REST sigue operativo.
@@ -102,6 +114,7 @@ public class KohaConnector implements PoolableConnector, CreateOp, UpdateOp, Upd
 						+ "El conector continua en modo REST unicamente. Detalle: {0}", e.getMessage());
 				this.jdbcConnectionProvider = null;
 				this.patronPermissionService = null;
+				this.actionLogSyncService = null;
 			}
 		} else {
 			LOG.ok("Canal JDBC deshabilitado (dbEnabled=false). Conector en modo REST unicamente.");
@@ -142,6 +155,7 @@ public class KohaConnector implements PoolableConnector, CreateOp, UpdateOp, Upd
 			jdbcConnectionProvider.close();
 			jdbcConnectionProvider = null;
 			patronPermissionService = null;
+			actionLogSyncService = null;
 		}
 	}
 
@@ -203,6 +217,8 @@ public class KohaConnector implements PoolableConnector, CreateOp, UpdateOp, Upd
 				CategoryMapper.ATTRIBUTE_METADATA_MAP,
 				"name"); // "name" is the ConnId Name for Categories
 		schemaBuilder.defineObjectClass(groupInfo);
+		// v1.8.0: el live sync solo existe para patrons; las categorias no tienen feed de cambios.
+		schemaBuilder.removeSupportedObjectClass(SyncOp.class, groupInfo);
 
 		Schema built = schemaBuilder.build();
 		this.connectorSchema.compareAndSet(null, built);
@@ -643,6 +659,128 @@ public class KohaConnector implements PoolableConnector, CreateOp, UpdateOp, Upd
 			LOG.error(e, "La prueba del conector falló con una excepción inesperada: {0}", e.getMessage());
 			// Wrap in ConnectorIOException as it's the most common type for test() failures.
 			throw new ConnectorIOException("La prueba de conexión falló inesperadamente: " + e.getMessage(), e);
+		}
+	}
+
+	// --- Live sync (v1.8.0) ---------------------------------------------------------------
+
+	/**
+	 * Live sync del «nombre preferido»: emite un {@code CREATE_OR_UPDATE} por cada patron cuyo
+	 * {@code preferred_name} (o el campo configurado en {@code syncTriggerFields}) haya cambiado
+	 * segun {@code action_logs}, salvo que el cambio lo hiciera un usuario excluido (antieco).
+	 * Detalle de reglas en {@link ActionLogChangeFilter} y {@link KohaLiveSync}.
+	 */
+	@Override
+	public void sync(ObjectClass objectClass, SyncToken token, SyncResultsHandler handler, OperationOptions options) {
+		requireAccountClass(objectClass, "sync");
+		ActionLogSyncService source = requireActionLogService();
+		Long from = KohaLiveSync.parseToken(token);
+		ActionLogChangeFilter filter = new ActionLogChangeFilter(resolveSyncExclusions(),
+				java.util.Arrays.asList(configuration.getSyncTriggerFields() != null
+						? configuration.getSyncTriggerFields() : new String[0]));
+		final boolean fetchFlags = isFlagsRequested(options);
+		final boolean fetchPermissions = isPermissionsRequested(options);
+		KohaLiveSync.PatronReader reader = borrowernumber -> readPatronForSync(borrowernumber, fetchFlags, fetchPermissions);
+		KohaLiveSync liveSync = new KohaLiveSync(source, reader, filter,
+				configuration.getSyncBatchSize(), configuration.getSyncSafetyLagSeconds());
+		LOG.ok("Live sync Koha: desde token {0}, excluidos {1}, campos {2}.", from,
+				filter.getExcludedUsers(), filter.getTriggerFields());
+		KohaLiveSync.Result result = liveSync.run(from, handler);
+		if (!result.isStoppedByHandler() && handler instanceof SyncTokenResultsHandler) {
+			((SyncTokenResultsHandler) handler).handleResult(new SyncToken(result.getFinalToken()));
+		}
+	}
+
+	@Override
+	public SyncToken getLatestSyncToken(ObjectClass objectClass) {
+		requireAccountClass(objectClass, "getLatestSyncToken");
+		long max = requireActionLogService().getMaxActionId();
+		LOG.ok("Live sync Koha: token actual action_id={0}.", max);
+		return new SyncToken(max);
+	}
+
+	private void requireAccountClass(ObjectClass objectClass, String op) {
+		if (objectClass == null || ObjectClass.ACCOUNT.equals(objectClass) || ObjectClass.ALL.equals(objectClass)) {
+			return;
+		}
+		throw new UnsupportedOperationException("Live sync de Koha (" + op + ") solo para cuentas (patrons), no para "
+				+ objectClass.getObjectClassValue());
+	}
+
+	private ActionLogSyncService requireActionLogService() {
+		if (!this.configuration.getDbEnabled()) {
+			throw new ConfigurationException("El live sync de Koha lee action_logs por JDBC: requiere dbEnabled=true "
+					+ "(y BorrowersLog=1 en Koha).");
+		}
+		if (this.actionLogSyncService == null) {
+			throw new ConnectionFailedException("El live sync de Koha necesita el canal JDBC, que no se pudo "
+					+ "inicializar en init(). Revise dbHost, credenciales y conectividad con la BD de Koha.");
+		}
+		return this.actionLogSyncService;
+	}
+
+	/**
+	 * borrowernumber excluidos: {@code syncExcludeUserIds} + {@code syncExcludeUserLogins} resueltos
+	 * por REST. Un login que no existe es un error de configuracion: seguir sin el emitiria los ecos
+	 * de midPoint como si fueran cambios ajenos.
+	 */
+	private java.util.Set<Long> resolveSyncExclusions() {
+		java.util.Set<Long> cached = this.resolvedSyncExclusions;
+		if (cached != null) {
+			return cached;
+		}
+		java.util.Set<Long> ids = new java.util.LinkedHashSet<>();
+		String[] rawIds = configuration.getSyncExcludeUserIds();
+		if (rawIds != null) {
+			for (String id : rawIds) {
+				if (id != null && !id.trim().isEmpty()) {
+					ids.add(Long.parseLong(id.trim()));
+				}
+			}
+		}
+		String[] logins = configuration.getSyncExcludeUserLogins();
+		if (logins != null) {
+			for (String login : logins) {
+				if (login == null || login.trim().isEmpty()) {
+					continue;
+				}
+				Long bn;
+				try {
+					bn = patronService.findPatronIdByUserid(login.trim());
+				} catch (IOException e) {
+					throw new ConnectorIOException("Live sync Koha: no se pudo resolver syncExcludeUserLogins '"
+							+ login + "': " + e.getMessage(), e);
+				}
+				if (bn == null) {
+					throw new ConfigurationException("Live sync Koha: syncExcludeUserLogins contiene '" + login
+							+ "', que no existe en Koha. Corrija la configuracion: sin el, los ecos de midPoint "
+							+ "se emitirian como cambios ajenos.");
+				}
+				ids.add(bn);
+			}
+		}
+		if (ids.isEmpty()) {
+			LOG.warn("Live sync Koha SIN antieco: syncExcludeUserIds y syncExcludeUserLogins estan vacios. "
+					+ "Los cambios que escribe midPoint volveran como eventos.");
+		}
+		java.util.Set<Long> result = java.util.Collections.unmodifiableSet(ids);
+		this.resolvedSyncExclusions = result;
+		return result;
+	}
+
+	private ConnectorObject readPatronForSync(long borrowernumber, boolean fetchFlags, boolean fetchPermissions) {
+		try {
+			JSONObject patronJson = patronService.getPatron(String.valueOf(borrowernumber));
+			if (patronJson == null || patronJson.length() == 0) {
+				return null;
+			}
+			ConnectorObject co = patronMapper.convertJsonToPatronObject(patronJson);
+			return enrichWithAuthorization(co, fetchFlags, fetchPermissions);
+		} catch (UnknownUidException e) {
+			return null;
+		} catch (IOException e) {
+			throw new ConnectorIOException("Live sync Koha: error de IO leyendo el patron " + borrowernumber
+					+ ": " + e.getMessage(), e);
 		}
 	}
 

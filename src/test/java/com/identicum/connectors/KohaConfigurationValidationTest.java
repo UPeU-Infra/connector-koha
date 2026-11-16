@@ -163,4 +163,50 @@ class KohaConfigurationValidationTest {
         assertEquals(3306, config.getDbPort(), "dbPort debe ser 3306 por defecto");
         assertEquals(2, config.getDbPoolSize(), "dbPoolSize debe ser 2 por defecto");
     }
+
+    // --- v1.8.0: live sync ---
+
+    private static KohaConfiguration basic() {
+        KohaConfiguration config = new KohaConfiguration();
+        config.setServiceAddress("http://koha.example.com");
+        config.setAuthenticationMethodStrategy("BASIC");
+        config.setUsername("admin");
+        config.setPassword(new org.identityconnectors.common.security.GuardedString("secret".toCharArray()));
+        return config;
+    }
+
+    @Test
+    void syncDefaults() {
+        KohaConfiguration config = basic();
+        assertDoesNotThrow(config::validate);
+        assertArrayEquals(new String[] {"preferred_name"}, config.getSyncTriggerFields());
+        assertEquals(500, config.getSyncBatchSize());
+        assertEquals(10, config.getSyncSafetyLagSeconds());
+        assertEquals(0, config.getSyncExcludeUserIds().length);
+    }
+
+    @Test
+    void syncBatchSizeFueraDeRango() {
+        KohaConfiguration config = basic();
+        config.setSyncBatchSize(0);
+        assertThrows(IllegalArgumentException.class, config::validate);
+        config.setSyncBatchSize(10001);
+        assertThrows(IllegalArgumentException.class, config::validate);
+    }
+
+    @Test
+    void syncSafetyLagNegativo() {
+        KohaConfiguration config = basic();
+        config.setSyncSafetyLagSeconds(-1);
+        assertThrows(IllegalArgumentException.class, config::validate);
+    }
+
+    @Test
+    void syncExcludeUserIdsSoloNumericos() {
+        KohaConfiguration config = basic();
+        config.setSyncExcludeUserIds(new String[] {"123", " 456 "});
+        assertDoesNotThrow(config::validate);
+        config.setSyncExcludeUserIds(new String[] {"svc_midpoint"});
+        assertThrows(IllegalArgumentException.class, config::validate);
+    }
 }
