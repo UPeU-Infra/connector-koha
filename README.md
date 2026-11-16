@@ -16,6 +16,7 @@ Conector de identidades para **Evolveum MidPoint** que gestiona el ciclo de vida
 * **Atributo `__ENABLE__` para ciclo de vida**: Control dual de estado mediante `patron_card_lost` y `expiry_date` para operaciones Joiner/Mover/Leaver.
 * **17 nuevos campos de Koha 25.x**: `preferred_name`, `pronouns`, `primary_contact_method`, `sms_number`, `middle_name`, `title`, `other_name`, `initials`, `relationship_type`, `sms_provider_id` y campos de dirección alternativa (`altaddress_*`).
 * **Categorías de solo lectura**: Las categorías reflejan el comportamiento real de la API de Koha.
+* **Live sync del nombre preferido (v1.8.0)**: `SyncOp` sobre `action_logs` por el canal JDBC; emite solo cambios de `preferred_name` con antieco por usuario. Ver [`doc/livesync-preferred-name.md`](doc/livesync-preferred-name.md).
 
 ## 📋 Requisitos Previos
 * **Java** Development Kit (JDK) **8** (lo exige `connector-parent` 1.5.2.0).
@@ -176,6 +177,21 @@ TRACE: Máximo nivel de detalle, incluyendo los payloads de las peticiones y res
 Revisa los logs de MidPoint para ver los mensajes emitidos por el conector.
 
 ## 📜 Changelog
+
+### v1.8.0 (sin publicar)
+
+- **Feature**: live sync (`SyncOp` + `getLatestSyncToken`) para el «nombre preferido». Cursor
+  `action_logs.action_id`; solo `MEMBERS/MODIFY` cuyo cambio toca `preferred_name`
+  (`syncTriggerFields`); antieco por **usuario** (`syncExcludeUserIds` / `syncExcludeUserLogins`),
+  nunca por `interface='api'`. Relee el patron y emite `CREATE_OR_UPDATE` con el objeto completo.
+  Entiende el formato de `info` de Koha 25.11 y de 26.05. Detalle, GRANT, prerrequisitos y
+  limitaciones en [`doc/livesync-preferred-name.md`](doc/livesync-preferred-name.md).
+- Requiere `BorrowersLog=1`, `dbEnabled=true` y `GRANT SELECT ON <bd>.action_logs` al usuario JDBC.
+  Sin el GRANT: `PermissionDeniedException` con el GRANT exacto.
+- El esquema de atributos no cambia, pero la versión sí (midPoint cachea el esquema por
+  bundle + versión). Ahora anuncia `SyncApiOp` solo para `__ACCOUNT__`.
+- **Tests**: `ActionLogChangeFilterTest`, `KohaLiveSyncTest`, `ActionLogSyncServiceTest`,
+  `KohaConnectorSyncTest`; `ActionLogSyncDevIT` contra una BD real (se salta sin variables de entorno).
 
 ### v1.7.1 (2026-10-28)
 
