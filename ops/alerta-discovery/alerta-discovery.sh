@@ -129,6 +129,7 @@ if [ -s "$TMP/malas" ]; then
   r=$(telegram "$(cat "$TMP/msg")")
   # Si el aviso no sale, no se avanza el cursor: se reintenta en la próxima pasada.
   [ "$r" = 200 ] || { echo "Telegram HTTP $r; cursor sin avanzar" >&2; exit 1; }
+  echo "$(date -u +%FT%TZ) aviso enviado: $N fila(s) fuera de preferred_name (ids $(cut -f1 "$TMP/malas" | paste -sd, -))"
 fi
 
 echo "$NUEVO_CURSOR" > "$CURSOR_FILE"
